@@ -1,0 +1,17 @@
+{
+    "name": "PintOS Development",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "workspaceMount": "source=${localWorkspaceFolder},target=/pintos,type=bind",
+    "workspaceFolder": "/pintos",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode.cpptools",
+                "ms-vscode.cpptools-extension-pack"
+            ]
+        }
+    },
+    "remoteUser": "root"
+}
