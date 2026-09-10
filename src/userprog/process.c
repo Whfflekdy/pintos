@@ -221,11 +221,20 @@ load (const char *file_name, void (**eip) (void), void **esp)
     goto done;
   process_activate ();
 
+  // TODO_1: parse file name
+  // strtok_r은 원본을 바꾸므로 문자열 파싱하기 전에 원본 복사. 
+  // fn_copy는 앞으로 실행 파일의 이름을 뜻함. 
+  char fn_copy[PGSIZE]; 
+  strlcpy(fn_copy, file_name, sizeof(fn_copy));
+
+  char* save_ptr;
+  strtok_r(fn_copy, " ", &save_ptr);
+
   /* Open executable file. */
-  file = filesys_open (file_name);
+  file = filesys_open (fn_copy);
   if (file == NULL) 
     {
-      printf ("load: %s: open failed\n", file_name);
+      printf ("load: %s: open failed\n", fn_copy);
       goto done; 
     }
 
@@ -238,7 +247,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
       || ehdr.e_phentsize != sizeof (struct Elf32_Phdr)
       || ehdr.e_phnum > 1024) 
     {
-      printf ("load: %s: error loading executable\n", file_name);
+      printf ("load: %s: error loading executable\n", fn_copy);
       goto done; 
     }
 
@@ -299,6 +308,20 @@ load (const char *file_name, void (**eip) (void), void **esp)
             goto done;
           break;
         }
+    }
+
+    // TODO_2: construct stack
+    char *argv[64]; // 파싱된 문자열을 담을 배열 
+    int argc = 0;
+    char *arg_addr[64]; // 파싱된 문자열이 저장된 주소의 배열 (&argv[0], &argv[1], [2], ...)
+
+    // 다시 한 번 file_name을 복사해서 \0을 지움.("echo x")
+    strlcpy(fn_copy, file_name, sizeof(fn_copy));
+    // argv에 하나씩 파싱해서 넣음.
+    char *token = strtok_r(fn_copy, " ", &save_ptr);
+    while(token!= NULL){
+      argv[argc++] = token;
+      token = strtok_r(NULL, " ", &save_ptr);
     }
 
   /* Set up stack. */
@@ -426,18 +449,22 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 
 /* Create a minimal stack by mapping a zeroed page at the top of
    user virtual memory. */
+   // 유저 프로그램이 실행될 때 사용할 '유저 스택'을 메모리에 최초로 할당하고 초기화하는 함수.
 static bool
 setup_stack (void **esp) 
 {
   uint8_t *kpage;
   bool success = false;
 
+  // 스택으로 사용할 4KB의 메모리 한 페이지를 할당 받음.
   kpage = palloc_get_page (PAL_USER | PAL_ZERO);
   if (kpage != NULL) 
     {
+      // 할당받은 물리 페이지를 유저의 가상 주소 공간의 최상단에 배치.
       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
+      // %esp 레지스터가 스택의 top을 가리키도록 설정.
       if (success)
-        *esp = PHYS_BASE;
+        *esp = PHYS_BASE; 
       else
         palloc_free_page (kpage);
     }
