@@ -18,8 +18,10 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 
-static thread_func start_process NO_RETURN;
-static bool load (const char *cmdline, void (**eip) (void), void **esp);
+static thread_func 
+start_process NO_RETURN;
+static bool 
+load (const char *cmdline, void (**eip) (void), void **esp);
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
@@ -28,6 +30,7 @@ static bool load (const char *cmdline, void (**eip) (void), void **esp);
 tid_t
 process_execute (const char *file_name) 
 {
+  //PANIC("!!! PROCESS_EXECUTE ENTERED !!!");
   char *fn_copy;
   tid_t tid;
 
@@ -40,6 +43,9 @@ process_execute (const char *file_name)
 
   /* Create a new thread to execute FILE_NAME. */
   tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+
+   printf(">>> process_execute: AFTER thread_create, tid=%d\n", tid);
+
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
   return tid;
@@ -50,6 +56,7 @@ process_execute (const char *file_name)
 static void
 start_process (void *file_name_)
 {
+  printf(">>> START_PROCESS ENTERED <<<\n");
   char *file_name = file_name_;
   struct intr_frame if_;
   bool success;
@@ -208,6 +215,9 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
 bool
 load (const char *file_name, void (**eip) (void), void **esp) 
 {
+  printf("====LOAD ENTER====\n");
+  printf("file_name = [%s]\n", file_name);
+
   struct thread *t = thread_current ();
   struct Elf32_Ehdr ehdr;
   struct file *file = NULL;
@@ -310,23 +320,106 @@ load (const char *file_name, void (**eip) (void), void **esp)
         }
     }
 
-    // TODO_2: construct stack
+  /* Set up stack. */
+  // 유저 스택의 초기 위치를 잡음
+  // (PHYS_BASE-PGSIZE)부터 PHYS_BASE까지의 공간에 페이지 할당
+  // PHYS_BASE를 top으로 삼아서 %esp가 유저 스택 공간의 최상단 가리키도록. 
+  printf("===Before setup_stack====\n");
+
+  if (!setup_stack (esp))
+    goto done;
+
+  printf("===Setup_stack success====\n");
+  
+  // TODO_2: construct stack
     char *argv[64]; // 파싱된 문자열을 담을 배열 
     int argc = 0;
     char *arg_addr[64]; // 파싱된 문자열이 저장된 주소의 배열 (&argv[0], &argv[1], [2], ...)
+    int len; // 반복문에서 각 argv[i]의 문자열 길이를 담을 변수.
 
     // 다시 한 번 file_name을 복사해서 \0을 지움.("echo x")
     strlcpy(fn_copy, file_name, sizeof(fn_copy));
     // argv에 하나씩 파싱해서 넣음.
     char *token = strtok_r(fn_copy, " ", &save_ptr);
     while(token!= NULL){
-      argv[argc++] = token;
+      argv[argc] = token;
+      // arg_addr[argc] = &argv[argc];
+      argc++;
       token = strtok_r(NULL, " ", &save_ptr);
     }
 
-  /* Set up stack. */
-  if (!setup_stack (esp))
-    goto done;
+    /* PHYS_BASE부터 유저 스택을 한 칸 씩 내려가며 data 저장. */
+    /* (1) |     argv[argc-1]     | */ // char[strlen(argv[i])];
+    /*     |     argv[argc-2]     | */ // char[]
+    /*     |         ...          | */ // char[]
+    /*     |       argv[0]        | */ // char[]
+    /* (2) |     <word align>     | */ // uint8_t (1바이트 타입)
+    /* (3) |      NULL('\0')      | */ // char *
+    /* (4) |     argv[argc-1]     | */ // char *
+    /*     |     argv[argc-2]     | */ // char *
+    /*     |         ...          | */ // char *
+    /*     |       argv[0]        | */ // char *
+    /* (5) |         argv         | */ // char **
+    /* (6) |         argc         | */ // int 
+    /* (7) |          0           | */ // void(*)() (ret addr)
+    
+    // (1) argv[i]에 적힌 문자열 저장
+    for(int i=argc-1; i>=0; i--){
+      // 스택 포인터 %esp를 argv[i]의 길이 만큼 내림. 
+      len = strlen(argv[i])+1; // 문자열 길이 + '\0'
+      *esp = (char *)*esp - len;
+      // 해당 위치에 argv[i] 저장.((void *)형인 esp를 (char *)형으로 캐스팅)
+      strlcpy((char *)*esp, argv[i], len);
+      // 현재의 *esp를 arg_addr에 기록하여 문자열의 시작 주소 저장.
+      arg_addr[i] = *esp;
+    }
+    // (2) word align 
+    // %esp의 하위 두 비트만큼 %esp를 빼기.
+    size_t padding = (unsigned int)*esp %4;
+    *esp = (char*)*esp - padding;
+    for(size_t i=0; i<padding; i++){
+      // *esp를 char* 형으로 만들어서 i칸을 이동.
+      // 해당 칸에 1바이트씩 0을 넣음. 
+      *(uint8_t*)((char *)*esp +i) =0;
+    }
+
+    // (3) NULL (argv[argc])
+    *esp = (char *)*esp -4;
+    *(uint32_t*)*esp = 0; 
+
+    // (4) argv[i] 저장
+    for(int i = argc-1; i>=0; i--){
+      *esp = (char*)*esp - 4;
+      // 원래 *esp는 void* 형이다. 
+      *(char **)*esp = arg_addr[i];
+    } 
+    // 현재의 %esp 저장해둠.((5)에서 쓰기 위함.)
+    char *argv_zero_addr = *esp;
+
+    // (5) argv 저장
+    *esp = (char *)*esp -4;
+    *(char **)*esp = argv_zero_addr;
+
+    // (6) argc 저장
+    *esp = (char*)*esp -4;
+    *(uint32_t *)*esp = (uint32_t)argc;
+
+    // (7) ret addr 저장
+    *esp = (char*)*esp -4;
+    *(uint32_t *)*esp = (uint32_t)0;
+
+    printf("=== STACK SETUP REACHED! ===\n");
+
+    hex_dump((uint32_t)*esp,
+        *esp,
+         (size_t)(PHYS_BASE - (uint32_t)*esp),
+         true);
+
+    printf("==== STACK DEBUG FINISHED ====\n");
+    /*
+    printf("==== STACK DEBUG STARTED===");
+    hex_dump((uint32_t )*esp, *esp, (size_t)(PHYS_BASE - (uint32_t)*esp), true);
+    */
 
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;
