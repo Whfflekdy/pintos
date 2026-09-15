@@ -95,6 +95,7 @@ start_process (void *file_name_)
 int
 process_wait (tid_t child_tid UNUSED) 
 {
+  while(1); //hex_dump()를 찍어보기 위함!!!
   return -1;
 }
 
@@ -227,16 +228,18 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
   /* Allocate and activate page directory. */
   t->pagedir = pagedir_create ();
-  if (t->pagedir == NULL) 
+  if (t->pagedir == NULL)
     goto done;
   process_activate ();
 
   // TODO_1: parse file name
   // strtok_r은 원본을 바꾸므로 문자열 파싱하기 전에 원본 복사. 
   // fn_copy는 앞으로 실행 파일의 이름을 뜻함. 
-  char fn_copy[PGSIZE]; 
-  strlcpy(fn_copy, file_name, sizeof(fn_copy));
+  char *fn_copy = palloc_get_page(PAL_ZERO); // 4KB 물리페이지 할당 받고 내부를 0으로 채음.
+  if(fn_copy==NULL) return false;
+  strlcpy(fn_copy, file_name, PGSIZE);
 
+  // 첫 문자열 파싱(실행 파일의 이름) ex. echo x의 echo
   char* save_ptr;
   strtok_r(fn_copy, " ", &save_ptr);
 
@@ -338,7 +341,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
     int len; // 반복문에서 각 argv[i]의 문자열 길이를 담을 변수.
 
     // 다시 한 번 file_name을 복사해서 \0을 지움.("echo x")
-    strlcpy(fn_copy, file_name, sizeof(fn_copy));
+    strlcpy(fn_copy, file_name, PGSIZE);
     // argv에 하나씩 파싱해서 넣음.
     char *token = strtok_r(fn_copy, " ", &save_ptr);
     while(token!= NULL){
@@ -408,13 +411,15 @@ load (const char *file_name, void (**eip) (void), void **esp)
     *esp = (char*)*esp -4;
     *(uint32_t *)*esp = (uint32_t)0;
 
-    printf("=== STACK SETUP REACHED! ===\n");
-
+    printf("==== STACK DEBUG REACHED! ====");
+    for (int i = 0; i < argc; i++) {
+    printf("arg_addr[%d]=%p, content = %s\n", i, arg_addr[i], arg_addr[i]);
+    }
+    printf("[USER STACK DUMP]\n");
     hex_dump((uint32_t)*esp,
         *esp,
          (size_t)(PHYS_BASE - (uint32_t)*esp),
          true);
-
     printf("==== STACK DEBUG FINISHED ====\n");
     /*
     printf("==== STACK DEBUG STARTED===");
@@ -428,6 +433,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
  done:
   /* We arrive here whether the load is successful or not. */
+  palloc_free_page(fn_copy);
   file_close (file);
   return success;
 }
