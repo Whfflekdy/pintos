@@ -411,7 +411,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
     *esp = (char*)*esp -4;
     *(uint32_t *)*esp = (uint32_t)0;
 
-    printf("==== STACK DEBUG REACHED! ====");
+    printf("==== STACK DEBUG REACHED! ====\n");
     for (int i = 0; i < argc; i++) {
     printf("arg_addr[%d]=%p, content = %s\n", i, arg_addr[i], arg_addr[i]);
     }
