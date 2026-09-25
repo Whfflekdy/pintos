@@ -1,5 +1,6 @@
 #ifndef THREADS_THREAD_H
 #define THREADS_THREAD_H
+#define FD_MAX 128 // 프로세스당 동시에 열 수 있는 최대 파일 개수.
 
 #include <debug.h>
 #include <list.h>
@@ -96,6 +97,7 @@ struct thread
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
+    struct file *fd_table[FD_MAX];
 #endif
 
     /* Owned by thread.c. */
