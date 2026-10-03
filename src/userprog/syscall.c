@@ -13,7 +13,7 @@
 #include "threads/palloc.h"     // for palloc_get_page, palloc_free_page
 #include "userprog/process.h"   // for process_execute, process_wait
 #include "lib/string.h"         // for strlcpy
-
+#include "filesys/filesys.h"
 
 static void syscall_handler (struct intr_frame *);
 struct lock filesys_lock; // 커널 전체에서 공유할 수 있는 락 변수 선언
@@ -35,6 +35,70 @@ check_addr(const void *vaddr){
   if(vaddr== NULL || !is_user_vaddr(vaddr) || pagedir_get_page(thread_current() -> pagedir, vaddr)== NULL)
     sys_exit(-1); // 유효하지 않으면 종료. 
   return;
+}
+
+// 문자열 전체가 유효한 유저 메모리인지 한 글자씩 검사
+static void
+check_str(const char *str)
+{
+  for(;;)
+  {
+    check_addr(str);
+    if(*str == '\0')
+      return;
+    str++;
+  }
+}
+
+// buffer부터 size 바이트가 전부 유효한지 검사(페이지마다 한 번씩)
+static void
+check_buffer(const void* buffer, unsigned size)
+{
+  const uint8_t *start = buffer;
+  const uint8_t *end;
+  const uint8_t *p;
+
+  if(size == 0)
+    return;
+  end = start + size -1;
+  if(end<start)
+    sys_exit(-1);
+  
+  check_addr(start);
+  check_addr(end);
+  for(p = (const uint8_t *) pg_round_down(start)+PGSIZE; p<=end; p+=PGSIZE)
+    check_addr(p);
+}
+
+// esp+4idx위치의 인자 하나를 검사후 꺼내는 함수(idx 0 = syscall num)
+static uint32_t
+get_arg(struct intr_frame *f, int idx)
+{
+  uint8_t *p = (uint8_t *)f->esp+4*idx;
+  check_addr(p);
+  check_addr(p+3); // 4바이트가 페이지 경계에 걸칠 수 있기 때문.
+  return *(uint32_t *)p;
+}
+
+//fd->struct file* 범위 밖이거나 안 열린 fd면 NULL
+static struct file*
+fd_to_file(int fd)
+{
+  if(fd<2 || fd >= FD_MAX)
+    return NULL;
+  return thread_current() -> fd_table[fd];
+}
+
+static int
+alloc_fd(struct file *file)
+{
+  struct thread *cur = thread_current();
+  for(int fd = 2; fd <FD_MAX; fd++)
+    if(cur->fd_table[fd]== NULL){
+      cur->fd_table[fd] = file;
+      return fd;
+    }
+  return -1;
 }
 
 void 
@@ -64,6 +128,7 @@ sys_exit(int exit_status){
 
 tid_t 
 sys_exec(const char *cmd_line){
+  check_str(cmd_line);
   // cmd_line에 주어진 이름을 가진 실행 파일을 실행하고,
   // 전달된 인자들을 넘겨준 뒤,
   // 새 프로세스의 pid를 반환한다.
@@ -133,38 +198,54 @@ sys_wait(tid_t tid){
   return exit_status;
 }
 
-int 
-sys_fibonacci(int n){
-  return 0;
-}
-
-int 
-sys_max_of_four_int(int a, int b, int c, int d){
-  return 0;
-}
-
 bool 
 sys_create(const char *file, unsigned initial_size){
-  return true;
+  check_str(file);
+  lock_acquire(&filesys_lock);
+  bool ok = filesys_create(file, initial_size);
+  lock_release(&filesys_lock);
+  return ok;
 }
 
 bool 
 sys_remove(const char *file){
-  return true;
+  check_str(file);
+  lock_acquire(&filesys_lock);
+  bool ok = filesys_remove(file);
+  lock_release(&filesys_lock);
+  return ok;
 }
 
 int 
 sys_open(const char *file){
-  return 0;
+  check_str(file);
+  lock_acquire(&filesys_lock);
+  struct file *f = filesys_open(file);
+  if(f==NULL){
+    lock_release(&filesys_lock);
+    return -1;
+  }
+  int fd = alloc_fd(f);
+  if(fd==-1)
+    file_close(f);
+  lock_release(&filesys_lock);
+  return fd;
 }
 
 int 
 sys_filesize(int fd){
-  return 0;
+  struct file *f = fd_to_file(fd);
+  if(f==NULL)
+    return -1;
+  lock_acquire(&filesys_lock);
+  int len = file_length(f);
+  lock_release(&filesys_lock);
+  return len;
 }
 
 int 
 sys_read(int fd, void *buffer, unsigned size){
+  check_buffer(buffer, size);
   if(fd == 0){
     uint8_t *buf_ptr = buffer;
     unsigned i;
@@ -178,7 +259,7 @@ sys_read(int fd, void *buffer, unsigned size){
     return -1;
   }
 
-  else if(fd < 0 || fd > FD_MAX){
+  else if(fd < 0 || fd >= FD_MAX){
     return -1;
   }
   // 일반 파일인 경우,
@@ -215,11 +296,12 @@ sys_write(int fd, const void *buffer, unsigned size){
   void putbuf(const char *buffer, size_t size); // size_t는 unsigned int이다.
   // 커널 내부에서 버퍼에 들어 있는 문자열 데이터를 화면에 통째로 출력해주는 함수.(lib/kernel/console.h)
   */
+  check_buffer(buffer, size);
   if(fd==1){
     putbuf(buffer, size);
     return (int)size;
   }
-  else if(fd<=0 || fd>FD_MAX){
+  else if(fd<=0 || fd>=FD_MAX){
     return -1;
   }
   // prj1-2
@@ -241,17 +323,61 @@ sys_write(int fd, const void *buffer, unsigned size){
 
 void 
 sys_seek(int fd, unsigned position){
+  struct file* f = fd_to_file(fd);
+  if(f==NULL)
+    return;
+  lock_acquire(&filesys_lock);
+  file_seek(f, position);
+  lock_release(&filesys_lock);
   return;
 }
 
 unsigned 
 sys_tell(int fd){
+  struct file *f = fd_to_file(fd);
+  if(f==NULL)
+    return 0;
+  lock_acquire(&filesys_lock);
+  unsigned pos = file_tell(f);
+  lock_release(&filesys_lock);
+  return pos;
   return 0;
 }
 
 void 
 sys_close(int fd){
-  return;
+  struct file *f = fd_to_file(fd);
+  if(f==NULL)
+    return;
+  lock_acquire(&filesys_lock);
+  file_close(f);
+  lock_release(&filesys_lock);
+  thread_current() -> fd_table[fd] = NULL;
+}
+
+int
+sys_fibonacci (int n)
+{
+  if (n <= 0)
+    return 0;
+  int a = 0, b = 1;
+  for (int i = 1; i < n; i++)
+    {
+      int t = a + b;
+      a = b;
+      b = t;
+    }
+  return b;
+}
+
+int
+sys_max_of_four_int (int a, int b, int c, int d)
+{
+  int m = a;
+  if (b > m) m = b;
+  if (c > m) m = c;
+  if (d > m) m = d;
+  return m;
 }
 
 /* $int 0x30을 불렀을 때 호출되는 syscall_handler이다. */
@@ -270,14 +396,15 @@ syscall_handler (struct intr_frame *f UNUSED)
 
   // 현재 스택에 쌓여있는 값 중 esp에 저장된 syscall num을 가져온다. 
   check_addr(f->esp);
-  int syscall_num = *(int*)f->esp;
+  //int syscall_num = *(int*)f->esp;
+  int num = (int)get_arg(f,0);
 
   // 유효한 시스템 콜 번호인지 확인(0~14(max_of_four_int와 fibonacci도 구현한다는 전제하에))
-  if(syscall_num<0 || syscall_num>14)
+  if(num<0 || num>14)
     sys_exit(-1);
 
   // 시스템 콜 번호에 따라 분기
-  switch(syscall_num){
+  switch(num){
     case SYS_HALT: {
     // void halt (void) NO_RETURN;
       sys_halt();
@@ -307,19 +434,20 @@ syscall_handler (struct intr_frame *f UNUSED)
       break;
     }
     case SYS_CREATE: {
-
+      f->eax = sys_create((const char *)get_arg(f,1),
+                          (unsigned)get_arg(f,2));
       break;
     }
-    case SYS_REMOVE: {
-
+    case SYS_REMOVE:{
+      f->eax = sys_remove ((const char *) get_arg (f, 1));
       break;
     }
     case SYS_OPEN: {
-
+      f->eax = sys_open ((const char *) get_arg (f, 1));
       break;
     }
     case SYS_FILESIZE: {
-
+      f->eax = sys_filesize ((int) get_arg (f, 1));
       break;
     }
     case SYS_READ: {
@@ -355,27 +483,29 @@ syscall_handler (struct intr_frame *f UNUSED)
       f-> eax = ret;
       break;
     }
-    case SYS_SEEK: {
-
+    case SYS_SEEK:{
+      sys_seek ((int) get_arg (f, 1), (unsigned) get_arg (f, 2));
       break;
     }
     case SYS_TELL: {
-
+      f->eax = sys_tell ((int) get_arg (f, 1));
       break;
     }
-    case SYS_CLOSE: {
-
+    case SYS_CLOSE:{
+      sys_close ((int) get_arg (f, 1));
       break;
     }
-    case SYS_FIBONACCI:{
-
+    case SYS_FIBONACCI: {
+      f->eax = sys_fibonacci ((int) get_arg (f, 1));
       break;
     }
     case SYS_MAX_OF_FOUR_INT: {
-
+      f->eax = sys_max_of_four_int ((int) get_arg (f, 1), (int) get_arg (f, 2),
+                                    (int) get_arg (f, 3), (int) get_arg (f, 4));
       break;
     }
-
+    default:
+      sys_exit (-1);            /* 알 수 없는 시스템 콜 번호 */
   }
   //thread_exit ();
 }

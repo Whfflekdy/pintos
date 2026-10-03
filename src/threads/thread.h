@@ -144,6 +144,7 @@ struct thread
 
     // 특정 fd로 파일 객체를 매핑하기 위한 fd table
     struct file *fd_table[FD_MAX];
+    struct file *exec_file; /* 실행줄인 파일 (쓰기 금지)*/
 #endif
 
     /* Owned by thread.c. */

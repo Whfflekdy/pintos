@@ -255,6 +255,24 @@ process_exit (void)
   struct thread *cur = thread_current ();
   uint32_t *pd;
 
+  // 시스템콜 도중 페이지 폴트로 죽었다면 lock을 쥔 채일 수 있다.
+  if(lock_held_by_current_thread(&filesys_lock))
+    lock_release(&filesys_lock);
+
+  lock_acquire(&filesys_lock);
+  for (int fd = 2; fd < FD_MAX; fd++)
+  if (cur->fd_table[fd] != NULL)
+    {
+      file_close (cur->fd_table[fd]);
+      cur->fd_table[fd] = NULL;
+    }
+  if (cur->exec_file != NULL)
+    {
+      file_close (cur->exec_file);   /* 내부에서 file_allow_write 호출됨 */
+      cur->exec_file = NULL;
+    }
+  lock_release (&filesys_lock);
+
     // 부모가 준 상자(cp)가 있다면 정보 갱신 후 부모 깨우기
   if(cur -> cp != NULL){
     cur->cp->exit_status = cur->exit_status;
@@ -415,7 +433,13 @@ load (const char *file_name, void (**eip) (void), void **esp)
   lock_acquire(&filesys_lock);
   /* Open executable file. */
   file = filesys_open (fn_copy);
-  lock_release(&filesys_lock);
+  //lock_release(&filesys_lock);
+
+  if(file == NULL){
+    printf("load: %s: open failed\n", fn_copy);
+    goto done;
+  }
+  file_deny_write(file);
 
   if (file == NULL) 
     {
@@ -607,7 +631,14 @@ load (const char *file_name, void (**eip) (void), void **esp)
   /* We arrive here whether the load is successful or not. */
   if(fn_copy !=NULL)
     palloc_free_page(fn_copy);
-  file_close (file);
+  
+  if(success)
+    t->exec_file = file;
+  else
+    file_close (file);
+
+  if(lock_held_by_current_thread(&filesys_lock))
+    lock_release(&filesys_lock);
   return success;
 }
 
