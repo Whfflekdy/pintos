@@ -6,17 +6,25 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "devices/shutdown.h"
+#include "threads/synch.h" // for struct lock
+#include "filesys/off_t.h"
+#include "devices/input.h" // for input_getc()
+#include "filesys/file.h" // for file_read(), file_write()
 
 static void syscall_handler (struct intr_frame *);
+struct lock filesys_lock; // 커널 전체에서 공유할 수 있는 락 변수 선언
 
 void
 syscall_init (void) 
 {
   intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
+   // 시스템콜 서브 시스템이 처음 켜질 때 락을 딱 한 번 초기화
+  lock_init(&filesys_lock);
 }
 
 // 전달받은 포인터가 유효한 유저 메모리 주소인지 확인하는 함수
-void check_addr(const void *vaddr){
+void
+check_addr(const void *vaddr){
   // 1. 널포인터인지
   // 2. 유저 가장 메모리 영역(PHYS_BASE 미만)이 맞는지
   // 3. 페이지 디렉토리에 실제로 매핑된 페이지가 존재하는지
@@ -25,7 +33,8 @@ void check_addr(const void *vaddr){
   return;
 }
 
-void sys_halt(void){
+void 
+sys_halt(void){
   // shutdown_power_off()를 호출함으로써 pintos를 종료시킨다.
   // 가능한 한 드물게 사용해야한다. 
   // 발생 가능한 교착 상태(deadlock) 상황 등에 대한 일부 정보를 잃게 되기 때문이다. 
@@ -33,7 +42,8 @@ void sys_halt(void){
   return;
 }
 
-void sys_exit(int exit_status){
+void 
+sys_exit(int exit_status){
   // void exit(int status)
   // 현재의 유저 프로그램을 종료하고 커널에 status를 반환한다.
   // 만일 process의 부모가 wait 상태로 이 프로그램의 종료를 기다리고 있다면-> 아래 wait()에서 이어서 설명. 
@@ -48,7 +58,8 @@ void sys_exit(int exit_status){
   thread_exit(); // 커널의 스레드 종료 함수 호출. 
 }
 
-tid_t sys_exec(const char *cmd_line){
+tid_t 
+sys_exec(const char *cmd_line){
   // cmd_line에 주어진 이름을 가진 실행 파일을 실행하고,
   // 전달된 인자들을 넘겨준 뒤,
   // 새 프로세스의 pid를 반환한다.
@@ -60,7 +71,8 @@ tid_t sys_exec(const char *cmd_line){
   return 0;
 }
 
-int sys_wait(tid_t tid){
+int 
+sys_wait(tid_t tid){
   /*
   자식 프로세스 pid를 기다리며 자식의 종료 상태(exit status)를 가져옴.
   만약 pid가 여전히 살아있다면, 종료될 때까지 기다린다.
@@ -99,35 +111,68 @@ int sys_wait(tid_t tid){
   return 0;
 }
 
-int sys_fibonacci(int n){
+int 
+sys_fibonacci(int n){
   return 0;
 }
 
-int sys_max_of_four_int(int a, int b, int c, int d){
+int 
+sys_max_of_four_int(int a, int b, int c, int d){
   return 0;
 }
 
-bool sys_create(const char *file, unsigned initial_size){
+bool 
+sys_create(const char *file, unsigned initial_size){
   return true;
 }
 
-bool sys_remove(const char *file){
+bool 
+sys_remove(const char *file){
   return true;
 }
 
-int sys_open(const char *file){
+int 
+sys_open(const char *file){
   return 0;
 }
 
-int sys_filesize(int fd){
+int 
+sys_filesize(int fd){
   return 0;
 }
 
-int sys_read(int fd, void *buffer, unsigned size){
-  return 0;
+int 
+sys_read(int fd, void *buffer, unsigned size){
+  if(fd == 0){
+    uint8_t *buf_ptr = buffer;
+    unsigned i;
+    for(i=0; i <size; i++){
+      buf_ptr[i] = input_getc(); // 한 글자씩 읽어서 버퍼에 저장
+    }
+    return (int)size;
+  }
+
+  if(fd==1){
+    return -1;
+  }
+
+  else if(fd < 0 || fd > FD_MAX){
+    return -1;
+  }
+  // 일반 파일인 경우,
+  struct thread *curr = thread_current();
+  struct file *file = curr ->fd_table[fd];
+  if(file == NULL) return -1;
+  
+  lock_acquire(&filesys_lock);
+  off_t bytes_read = file_read(file, buffer, size);
+  lock_release(&filesys_lock);
+
+  return (int)bytes_read;
 }
 
-int sys_write(int fd, const void *buffer, unsigned size){
+int 
+sys_write(int fd, const void *buffer, unsigned size){
   /* 
   열려 있는 fd에 buffer로부터 size 바이트만큼을 쓴다.
   실제로 쓰여진 바이트 수를 반환하며 일부 바이트를 쓸 수 없는 경우 size보다 작을 수 있다.
@@ -150,30 +195,40 @@ int sys_write(int fd, const void *buffer, unsigned size){
   */
   if(fd==1){
     putbuf(buffer, size);
-    return size;
+    return (int)size;
   }
-  else if(fd==0){
+  else if(fd<=0 || fd>FD_MAX){
     return -1;
   }
-  else if(fd>=2){ // prj1-2
-    // fd 테이블 내에서 현재 fd를 찾아보고, 
-    // 없다면 -1 리턴, 
-    // 있다면 file_write() 호출 및 쓰여진 바이트 수 반환
-    struct file *file = thread_current()->fd_table[fd];
-    if(file == NULL) return -1;
-    return file_write(file, buffer, size);
-  }
+  // prj1-2
+
+  // 일반 파일 처리: 현재 스레드의 fd_table에서 파일 객체 가져오기
+  struct thread *curr = thread_current();
+  struct file *file = curr->fd_table[fd];
+  // fd 테이블 내에서 현재 fd를 찾아보고, 
+  // 없다면 -1 리턴, 
+  // 있다면 file_write() 호출 및 쓰여진 바이트 수 반환
+  if(file == NULL) return -1;
+
+  lock_acquire(&filesys_lock);
+  off_t bytes_written = file_write(file, buffer, size);
+  lock_release(&filesys_lock);
+
+  return (int)bytes_written;
 }
 
-void sys_seek(int fd, unsigned position){
+void 
+sys_seek(int fd, unsigned position){
   return;
 }
 
-unsigned sys_tell(int fd){
+unsigned 
+sys_tell(int fd){
   return 0;
 }
 
-void sys_close(int fd){
+void 
+sys_close(int fd){
   return;
 }
 
@@ -209,19 +264,24 @@ syscall_handler (struct intr_frame *f UNUSED)
     case SYS_EXIT: {
       // void exit(int status)
       check_addr(f->esp+4);
-      int exit_status = *(int*)(f->esp +4);
+      int exit_status = *(int*)((char *)f->esp +4);
       sys_exit(exit_status);
       break;
     }
     case SYS_EXEC: { 
       // pid_t exec (const char *file);
       check_addr(f->esp+4);
-      int file_name = *(int*)(f->esp+4);
-      sys_exec(file_name);
+      const char* file_name = *(const char**)((char *)f->esp+4);
+      if(file_name==NULL) sys_exit(-1);
+      check_addr(file_name);
+      f->eax = sys_exec(file_name);
       break;
     }
     case SYS_WAIT: {
-
+      // int wait (pid_t);
+      check_addr(f->esp+4);
+      tid_t tid = *(tid_t *)((char *)f->esp+4);
+      f->eax = sys_wait(tid);
       break;
     }
     case SYS_CREATE: {
@@ -241,7 +301,19 @@ syscall_handler (struct intr_frame *f UNUSED)
       break;
     }
     case SYS_READ: {
+      // int read (int fd, void *buffer, unsigned length);
+      check_addr(f->esp+4);
+      check_addr(f->esp+8);
+      check_addr(f->esp+12);
 
+      int fd = *(int*)((char *)f->esp+4);
+      // f->esp+4의 공간을 주소값을 가리키는 포인터(const void **)로 간주
+      // 여기에 들어가는 주소값을 가져오기(*)
+      void * buffer = *(void **)((char *)f->esp+4);
+      unsigned size = *(unsigned*)(f->esp+12);
+
+      int ret = sys_read(fd, buffer, size);
+      f-> eax = ret;
       break;
     }
     case SYS_WRITE: {
@@ -250,11 +322,11 @@ syscall_handler (struct intr_frame *f UNUSED)
       check_addr(f->esp+8);
       check_addr(f->esp+12);
 
-      int fd = *(int*)(f->esp+4);
-      // (f->esp+8)에는 문자열의 주소값이 담기고 이를 4바이트 정수형 주소(uint32_t *)로 읽는다.
+      int fd = *(int*)((char *)f->esp+4);
+      // (f->esp+8)에는 문자열의 주소값이 담기고 이 주소를 const void*로 읽는다.
       // 해당 값을 스택에서 꺼내오고 (*)
       // write 두 번째 인자인 buffer의 형으로 casting(const void*)
-      const void* buffer = (const void*)*(uint32_t *)(f->esp+8);
+      void* buffer = *(void **)((char *)f->esp+8);
       unsigned size = *(unsigned*)(f->esp+12);
 
       int ret = sys_write(fd, buffer, size);

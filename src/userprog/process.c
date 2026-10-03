@@ -43,11 +43,20 @@ process_execute (const char *file_name)
 
   /* Create a new thread to execute FILE_NAME. */
   tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
-
-   printf(">>> process_execute: AFTER thread_create, tid=%d\n", tid);
-
+  
+  // 스레드 생성 실패 여부 확인.
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
+
+  // 생성이 성공하면 자식을 찾아 load sema_down 처리 진행.
+  struct thread* t = get_child_thread(tid);
+  if(t!= NULL){
+    printf(">>> process_execute: AFTER thread_create, tid=%d\n", tid);
+    sema_down(&t-> load_sema);
+
+    // 로드 실패 시 처리
+    if(!t -> load_success) return TID_ERROR;
+  }
   return tid;
 }
 
@@ -56,6 +65,7 @@ process_execute (const char *file_name)
 static void
 start_process (void *file_name_)
 {
+  // 이 함수의 시작부터 thread_current는 자식 프로세스가 됨~
   printf(">>> START_PROCESS ENTERED <<<\n");
   char *file_name = file_name_;
   struct intr_frame if_;
@@ -66,7 +76,14 @@ start_process (void *file_name_)
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
+  // load 호출!!!
   success = load (file_name, &if_.eip, &if_.esp);
+
+  /* 자식 구조체(현재는 본인)에 로드 성공 여부를 기록 */
+  thread_current()->load_success = success;
+
+  /* load_sema를 UP 시켜서 부모를 깨움(엄마 저 로드 끝났어요~!) */
+  sema_up(&thread_current()->load_sema);
 
   /* If load failed, quit. */
   palloc_free_page (file_name);
@@ -95,14 +112,30 @@ start_process (void *file_name_)
 int
 process_wait (tid_t child_tid UNUSED) 
 {
-  while(1); //hex_dump()를 찍어보기 위함!!!
-  return -1;
+  // while(1); //hex_dump()를 찍어보기 위함!!!
+
+  // process_wait()은 부모 스레드가 호출해서 실행하는 함수(thread_curent()는 부모)
+  struct thread* child = get_child_thread(child_tid);
+  // 실제로 child_list에 존재하는 자식인지 찾기
+  if(child==NULL) 
+    return TID_ERROR; // 없으면 에러 반환. 
+
+  // 자식이 종료할 때까지 기다리기(wait_sema down)
+  sema_down(&child -> wait_sema);
+  // 자식의 exit status 백업하기
+  int exit_status = child->exit_status;
+  // 자식에게 사라져도 된다고 exit_sema up을 통해 알려주기.
+  sema_up(&child -> exit_sema);
+  // 자식 리스트에서 제거하고 exit status 리턴
+  list_remove(&child->child_elem);
+  return exit_status;
 }
 
 /* Free the current process's resources. */
 void
 process_exit (void)
 {
+  // 여기서의 thread_current()는 자식 스레드. 
   struct thread *cur = thread_current ();
   uint32_t *pd;
 
@@ -121,6 +154,13 @@ process_exit (void)
       cur->pagedir = NULL;
       pagedir_activate (NULL);
       pagedir_destroy (pd);
+    }
+    // 페이지 디렉터리 등 자원 정리가 끝난 직후 세마포어 동기화 처리.
+    if(cur->parent!= NULL){
+      // 자식의 wait_sema 깨우고(엄마 저 이제 종료할게요!!)
+      sema_up(&cur->wait_sema);
+      // 자식의 exit_sema 잠재우기(엄마 아직 제 exit_status 안 가져가셨죠?? 조금 기다릴게요.)
+      sema_down(&cur->exit_sema);
     }
 }
 
