@@ -10,6 +10,10 @@
 #include "filesys/off_t.h"
 #include "devices/input.h" // for input_getc()
 #include "filesys/file.h" // for file_read(), file_write()
+#include "threads/palloc.h"     // for palloc_get_page, palloc_free_page
+#include "userprog/process.h"   // for process_execute, process_wait
+#include "lib/string.h"         // for strlcpy
+
 
 static void syscall_handler (struct intr_frame *);
 struct lock filesys_lock; // 커널 전체에서 공유할 수 있는 락 변수 선언
@@ -51,7 +55,7 @@ sys_exit(int exit_status){
   struct thread *curr = thread_current(); // 현재 실행 중인 스레드를 가져와서
   
   // 종료 상태를 현재 스레드 구조체에 저장.
-  curr-> status = exit_status;
+  curr-> exit_status = exit_status;
 
   // "Process Name: exit(exit status)"를 출력.
   printf("%s: exit(%d)\n", curr->name, exit_status);
@@ -68,7 +72,18 @@ sys_exec(const char *cmd_line){
   // 따라서 부모 프로세스는 자식 프로세스가 실행 파일을 성공적으로 
   // 로드했는지의 여부를 알 때까지, exec에서 리턴 불가능하며,
   // 이를 보장하기 위해 적절한 동기화를 사용해야 한다.
-  return 0;
+  
+  // 커널 페이지 할당
+  char *fn_copy = palloc_get_page(0);
+  if(fn_copy == NULL)
+    return TID_ERROR;
+
+  strlcpy(fn_copy, cmd_line, PGSIZE);
+
+  tid_t tid = process_execute(fn_copy);
+
+  palloc_free_page(fn_copy);
+  return tid;
 }
 
 int 
@@ -108,7 +123,14 @@ sys_wait(tid_t tid){
   process_wait()을 활용해 wait system call을 구현할 것을 권장함.
 
   */
-  return 0;
+  // 현재 프로세스의 자식 중 해당 tid가 실제로 존재하는 지 확인 
+  //struct thread *child = get_thread(tid);
+  //if(child == NULL) return -1;
+
+  // process_wait 호출하여 자식이 끝날 때까지 대기하고 exit status 받아오기
+  int exit_status = process_wait(tid);
+
+  return exit_status;
 }
 
 int 
@@ -236,7 +258,7 @@ sys_close(int fd){
 static void
 syscall_handler (struct intr_frame *f UNUSED) 
 {
-  printf ("system call!\n");
+  //printf ("system call!\n");
   /* 현재 스택의 상태는 다음과 같다. */
   /*                     ex. write(fd, buffer, size);
     esp+16 |  arg3  |     
@@ -309,7 +331,7 @@ syscall_handler (struct intr_frame *f UNUSED)
       int fd = *(int*)((char *)f->esp+4);
       // f->esp+4의 공간을 주소값을 가리키는 포인터(const void **)로 간주
       // 여기에 들어가는 주소값을 가져오기(*)
-      void * buffer = *(void **)((char *)f->esp+4);
+      void * buffer = *(void **)((char *)f->esp+8);
       unsigned size = *(unsigned*)(f->esp+12);
 
       int ret = sys_read(fd, buffer, size);

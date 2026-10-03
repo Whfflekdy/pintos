@@ -86,6 +86,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// struct thread 내부의 멤버로 들어가 있는 작은 고리
+// 앞 칸을 가리키는 포인터(prev), 뒷 칸을 가리키는 포인터(next)로 구성
 /* List element. */
 struct list_elem 
   {
@@ -93,6 +95,9 @@ struct list_elem
     struct list_elem *next;     /* Next list element. */
   };
 
+
+// 현재 리스트 안에 아이템이 몇 개나 들어있는지에 관한 전체적인 상태를 관리
+// 시작점(head)과 끝점(tail)을 통해서.
 /* List. */
 struct list 
   {
@@ -105,6 +110,23 @@ struct list
    name of the outer structure STRUCT and the member name MEMBER
    of the list element.  See the big comment at the top of the
    file for an example. */
+/* <list_entry 매크로>
+ * 리스트의 작은 고리(list_elem) 주소로부터, 그 고리를 품고 있는 
+ * 거대한 본체 구조체(예: struct thread)의 시작 주소를 역으로 찾아냄.
+ * 
+ * [인자 정리]
+ * LIST_ELEM: 주소 역산의 시작점(작은 고리의 포인터)
+ * STRUCT: 찾아내고 싶은 본체 구조체의 타입(Casting 대상)
+ * MEMBER: STRUCT 안에서 LIST_ELEM이 어떤 이름의 필드로 선언되어 있는지
+ * 
+ * [동작 원리]
+ * (고리의 실제 메모리 주소) - (구조체 내부에서 해당 고리가 차지하는 위치의 오프셋) 
+ * = 본체 구조체의 진짜 시작 주소
+ * 
+ * 결과적으로 자식 스레드의 고리(child_elem)를 찾았을 때, 
+ * 이 매크로를 통해 자식 스레드 본체(struct thread *)를 획득하여 
+ * t->exit_status나 t->wait_sema 같은 필드에 접근할 수 있음.
+ */
 #define list_entry(LIST_ELEM, STRUCT, MEMBER)           \
         ((STRUCT *) ((uint8_t *) &(LIST_ELEM)->next     \
                      - offsetof (STRUCT, MEMBER.next)))

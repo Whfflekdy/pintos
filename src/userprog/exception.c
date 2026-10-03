@@ -4,6 +4,8 @@
 #include "userprog/gdt.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "threads/vaddr.h"      /* is_user_vaddr */
+#include "userprog/syscall.h"   /* sys_exit */
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
@@ -147,6 +149,11 @@ page_fault (struct intr_frame *f)
   not_present = (f->error_code & PF_P) == 0;
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
+
+  /* 추가: 유저 모드에서 난 fault, 또는 커널이 유저 주소를 건드리다 난 fault
+     → 해당 프로세스만 exit(-1)로 종료 */
+  if (user || is_user_vaddr (fault_addr))
+    sys_exit (-1);
 
   /* To implement virtual memory, delete the rest of the function
      body, and replace it with code that brings in the page to

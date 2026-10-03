@@ -309,6 +309,13 @@ list_size (struct list *list)
 bool
 list_empty (struct list *list)
 {
+  // head.next와 tail.prev가 같다(head와 tail 사이에 노드가 없다.)
+  /*
+   [ head ] <-------> [ tail ]
+   head.next           &tail
+  (list_begin)       (list_end)
+  -> 둘이 서로 같음!
+  */
   return list_begin (list) == list_end (list);
 }
 

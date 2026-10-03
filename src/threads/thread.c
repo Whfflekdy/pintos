@@ -71,6 +71,7 @@ static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
 
+
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
    general and it is possible in this case only because loader.S
@@ -182,6 +183,12 @@ thread_create (const char *name, int priority,
   /* Initialize thread. */
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
+  
+  // t의 자식 부모 관계 설정(현재의 current는 부모)
+  t->parent = thread_current();
+  // list_init(&t->child_list); // 자식(t)의 자식 리스트 초기화 -> 어떤 경로로 스레드가 생성되든 자식 리스트가 잘 초기화되도록 init_thread()안으로 이동. 
+  // 부모의 child_list에 새로 생성된 자식인 t를 넣음.
+  // list_push_back(&thread_current()->child_list, &t->child_elem);
 
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame (t, sizeof *kf);
@@ -198,11 +205,64 @@ thread_create (const char *name, int priority,
   sf->eip = switch_entry;
   sf->ebp = 0;
 
+  // Ready Queue에 들어간 후, 스케줄러가 타이머 인터럽트를 통해
+  // CPU를 부모 스레드에게서 빼앗아 자식에게 넘겨주면 current가 자식이 되는 것. 
   /* Add to run queue. */
   thread_unblock (t);
 
   return tid;
 }
+
+/* 추가 구현 함수 
+  현재 스레드의 자식 리스트에서 주어진 tid에 해당하는 스레드를 찾아 반환하는 함수.
+*/
+/*
+struct thread*
+get_child_thread(tid_t tid)
+{
+  struct thread *current = thread_current();
+  struct list_elem *e;
+
+  for(e=list_begin(&current->child_list); 
+      e!=list_end(&current->child_list); e = list_next(e)){
+        struct thread *t = list_entry(e, struct thread, child_elem);
+        if(t->tid== tid)
+          return t;
+      }
+  return NULL;
+}
+*/
+
+struct thread*
+get_thread(tid_t tid)
+{
+  struct list_elem *e;
+
+  for(e = list_begin(&all_list); e!= list_end(&all_list);
+      e = list_next(e))
+      {
+        struct thread *t = list_entry(e, struct thread, allelem);
+        if(t->tid == tid)
+          return t;
+      }
+  return NULL;
+}
+
+struct child_status *
+get_child_status(tid_t child_tid)
+{
+  struct thread *cur = thread_current();
+  struct list_elem *e;
+
+  for(e=list_begin(&cur->child_list); 
+      e!=list_end(&cur->child_list); e = list_next(e)){
+        struct child_status *st = list_entry(e, struct child_status, elem);
+        if(st->tid==child_tid)
+          return st;
+      }
+  return NULL;
+}
+
 
 /* Puts the current thread to sleep.  It will not be scheduled
    again until awoken by thread_unblock().
@@ -456,13 +516,29 @@ init_thread (struct thread *t, const char *name, int priority)
   ASSERT (t != NULL);
   ASSERT (PRI_MIN <= priority && priority <= PRI_MAX);
   ASSERT (name != NULL);
-
+  // 새로 할당된 struct thread 구조체의 전체 메모리 공간을 통쨰로 0으로 밀기.
   memset (t, 0, sizeof *t);
   t->status = THREAD_BLOCKED;
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   t->magic = THREAD_MAGIC;
+
+  /*
+  // 세마포어 초기화 (첫 인자를 semaphore*로 받기 때문에 &t->sema를 넣어줘야 함.)
+  sema_init(&t->wait_sema, 0);
+  sema_init(&t->load_sema, 0);
+  sema_init(&t->exit_sema, 0);
+  */
+  // 모든 스레드의 자식 리스트를 여기서 초기화. 
+  list_init (&t->child_list);
+
+  // memset으로 밀긴 하지만 명시적으로 한 번 더 적어줌(fd table의 경우는 memset을 사용해야 하니까 굳이 적지 않음)
+  //t-> exit_status = 0;
+  //t->load_success = false;
+
+  t->parent = NULL;
+  t->cp =NULL;
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);

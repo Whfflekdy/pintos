@@ -17,11 +17,20 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "filesys/file.h" // for file_read(), file_write(), filesys_lock
+#include "threads/malloc.h" // for malloc
 
 static thread_func 
 start_process NO_RETURN;
 static bool 
 load (const char *cmdline, void (**eip) (void), void **esp);
+extern struct lock filesys_lock;
+
+/* start_process에 넘길 정보 묶음 */
+struct exec_info {
+  char *fn_copy;                 /* 커맨드라인 복사본 */
+  struct child_status *child;    /* 부모가 만든 상태 상자 */
+};
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
@@ -33,6 +42,7 @@ process_execute (const char *file_name)
   //PANIC("!!! PROCESS_EXECUTE ENTERED !!!");
   char *fn_copy;
   tid_t tid;
+  struct exec_info info;
 
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
@@ -41,35 +51,108 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
+  /* [6번] 스레드 이름은 첫 토큰만 */
+  char thread_name[16];
+  char *save_ptr;
+  strlcpy (thread_name, file_name, sizeof thread_name);
+  char *prog_name = strtok_r (thread_name, " ", &save_ptr);
+  if (prog_name == NULL) {
+    palloc_free_page (fn_copy);
+    return TID_ERROR;
+  }
+
+
+  // struct child_status 동적 할당 및 초기화(필요한 크기만 할당하기 위해 malloc사용)
+  struct child_status *child = malloc(sizeof(struct child_status));
+  if(child == NULL){
+    palloc_free_page(fn_copy);
+    return TID_ERROR;
+  }
+
+  child->tid = TID_ERROR; // 나중에 채움
+  child->exit_status = -1;
+  child->is_exited = false;
+  child->load_success = false;
+  sema_init(&child->wait_sema, 0);
+  sema_init(&child->load_sema, 0);
+
+  list_push_back(&thread_current() ->child_list, &child->elem);
+  
+  info.fn_copy = fn_copy;
+  info.child = child;
+
+  // 자식 스레드 생성
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (prog_name, PRI_DEFAULT, start_process, &info);
   
   // 스레드 생성 실패 여부 확인.
-  if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
+  if (tid == TID_ERROR){
+    palloc_free_page (fn_copy);
+    free(child);
+    return TID_ERROR; 
+  }
+  child->tid = tid;
+  sema_down(&child->load_sema);
 
-  // 생성이 성공하면 자식을 찾아 load sema_down 처리 진행.
+  if(!child->load_success){
+    list_remove(&child->elem);
+    free(child);
+    return TID_ERROR;
+  }
+
+  /*
+  // 생성된 실제 tid를 child_status에 넣고,
+  child->tid = tid;
+  // 부모의 child_list에 등록
+  struct thread *cur = thread_current();
+  list_push_back(&cur->child_list, &child->elem);
+  */
+  // 자식이 메모리에 완전히 로드 될때까지 load_sema로 대기 */
+  // 자식 스레드의 포인터를 안전하게 얻어오기 위해
+  // thread_create 직후에 자식 스레드 구조체를 찾아 load_sema를 down 처리
+  /*
   struct thread* t = get_child_thread(tid);
   if(t!= NULL){
     printf(">>> process_execute: AFTER thread_create, tid=%d\n", tid);
     sema_down(&t-> load_sema);
 
     // 로드 실패 시 처리
+    if(!t -> load_success){
+      // 리스트에서 제거하고 에러 처리
+      list_remove(&child->elem);
+      free(child);
+      return TID_ERROR;
+    }
+  } */
+  // load_sema, exit_sema를 사용할 때의 코드 
+  // 생성이 성공하면 자식을 찾아 load sema_down 처리 진행.
+  /* struct thread* t = get_child_thread(tid);
+  if(t!= NULL){
+    printf(">>> process_execute: AFTER thread_create, tid=%d\n", tid);
+    sema_down(&t-> load_sema);
+
+    // 로드 실패 시 처리
     if(!t -> load_success) return TID_ERROR;
-  }
+  } */
+
   return tid;
 }
 
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *file_name_)
+start_process (void *aux)
 {
   // 이 함수의 시작부터 thread_current는 자식 프로세스가 됨~
-  printf(">>> START_PROCESS ENTERED <<<\n");
-  char *file_name = file_name_;
+  //printf(">>> START_PROCESS ENTERED <<<\n");
+  struct exec_info *info = aux;
+  char *file_name = info->fn_copy;
+  struct child_status *child = info->child;
+  struct thread *cur = thread_current();
   struct intr_frame if_;
   bool success;
+
+  cur -> cp = child; // race 차단.
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
@@ -79,17 +162,26 @@ start_process (void *file_name_)
   // load 호출!!!
   success = load (file_name, &if_.eip, &if_.esp);
 
+  palloc_free_page(file_name);
+  child->load_success = success;
+  if(!success){
+    cur->cp =NULL;
+    sema_up(&child->load_sema);
+    thread_exit();
+  }
+  
+  sema_up(&child->load_sema);
   /* 자식 구조체(현재는 본인)에 로드 성공 여부를 기록 */
-  thread_current()->load_success = success;
+ // thread_current()->load_success = success;
 
   /* load_sema를 UP 시켜서 부모를 깨움(엄마 저 로드 끝났어요~!) */
-  sema_up(&thread_current()->load_sema);
+ // sema_up(&thread_current()->load_sema);
 
   /* If load failed, quit. */
-  palloc_free_page (file_name);
-  if (!success) 
-    thread_exit ();
-
+  //palloc_free_page (file_name);
+  //if (!success) 
+  //  thread_exit ();
+  
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
      threads/intr-stubs.S).  Because intr_exit takes all of its
@@ -114,6 +206,30 @@ process_wait (tid_t child_tid UNUSED)
 {
   // while(1); //hex_dump()를 찍어보기 위함!!!
 
+  struct thread *cur = thread_current();
+  struct list_elem *e;
+  struct child_status *child_st = NULL;
+
+  // 부모의 child_list에서 tid를 가진 상자(child_status) 찾기
+  for(e = list_begin(&cur->child_list); e!=list_end(&cur->child_list); 
+      e = list_next(e)){
+        struct child_status *st = list_entry(e, struct child_status, elem);
+        if(st->tid == child_tid){
+          child_st = st;
+          break;
+        }
+      }
+      if(child_st == NULL)
+        return -1;
+
+      sema_down(&child_st -> wait_sema);
+      // 종료 상태 백업
+      int exit_status = child_st->exit_status;
+
+      list_remove(&child_st->elem);
+      free(child_st);
+
+  /*
   // process_wait()은 부모 스레드가 호출해서 실행하는 함수(thread_curent()는 부모)
   struct thread* child = get_child_thread(child_tid);
   // 실제로 child_list에 존재하는 자식인지 찾기
@@ -127,7 +243,7 @@ process_wait (tid_t child_tid UNUSED)
   // 자식에게 사라져도 된다고 exit_sema up을 통해 알려주기.
   sema_up(&child -> exit_sema);
   // 자식 리스트에서 제거하고 exit status 리턴
-  list_remove(&child->child_elem);
+  list_remove(&child->child_elem);*/
   return exit_status;
 }
 
@@ -138,6 +254,13 @@ process_exit (void)
   // 여기서의 thread_current()는 자식 스레드. 
   struct thread *cur = thread_current ();
   uint32_t *pd;
+
+    // 부모가 준 상자(cp)가 있다면 정보 갱신 후 부모 깨우기
+  if(cur -> cp != NULL){
+    cur->cp->exit_status = cur->exit_status;
+    cur->cp->is_exited = true;
+    sema_up(&cur->cp->wait_sema);
+  }
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -156,12 +279,15 @@ process_exit (void)
       pagedir_destroy (pd);
     }
     // 페이지 디렉터리 등 자원 정리가 끝난 직후 세마포어 동기화 처리.
+
+
+    /*
     if(cur->parent!= NULL){
       // 자식의 wait_sema 깨우고(엄마 저 이제 종료할게요!!)
       sema_up(&cur->wait_sema);
       // 자식의 exit_sema 잠재우기(엄마 아직 제 exit_status 안 가져가셨죠?? 조금 기다릴게요.)
       sema_down(&cur->exit_sema);
-    }
+    }*/
 }
 
 /* Sets up the CPU for running user code in the current
@@ -256,8 +382,8 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
 bool
 load (const char *file_name, void (**eip) (void), void **esp) 
 {
-  printf("====LOAD ENTER====\n");
-  printf("file_name = [%s]\n", file_name);
+  //printf("====LOAD ENTER====\n");
+  //printf("file_name = [%s]\n", file_name);
 
   struct thread *t = thread_current ();
   struct Elf32_Ehdr ehdr;
@@ -265,6 +391,8 @@ load (const char *file_name, void (**eip) (void), void **esp)
   off_t file_ofs;
   bool success = false;
   int i;
+  char *fn_copy = NULL;
+  char *save_ptr;
 
   /* Allocate and activate page directory. */
   t->pagedir = pagedir_create ();
@@ -275,16 +403,20 @@ load (const char *file_name, void (**eip) (void), void **esp)
   // TODO_1: parse file name
   // strtok_r은 원본을 바꾸므로 문자열 파싱하기 전에 원본 복사. 
   // fn_copy는 앞으로 실행 파일의 이름을 뜻함. 
-  char *fn_copy = palloc_get_page(PAL_ZERO); // 4KB 물리페이지 할당 받고 내부를 0으로 채음.
-  if(fn_copy==NULL) return false;
+  fn_copy = palloc_get_page(PAL_ZERO); // 4KB 물리페이지 할당 받고 내부를 0으로 채음.
+  if(fn_copy==NULL) 
+    goto done;
   strlcpy(fn_copy, file_name, PGSIZE);
 
   // 첫 문자열 파싱(실행 파일의 이름) ex. echo x의 echo
-  char* save_ptr;
   strtok_r(fn_copy, " ", &save_ptr);
 
+  // 파일을 여닫기 전 lock 설정
+  lock_acquire(&filesys_lock);
   /* Open executable file. */
   file = filesys_open (fn_copy);
+  lock_release(&filesys_lock);
+
   if (file == NULL) 
     {
       printf ("load: %s: open failed\n", fn_copy);
@@ -367,12 +499,12 @@ load (const char *file_name, void (**eip) (void), void **esp)
   // 유저 스택의 초기 위치를 잡음
   // (PHYS_BASE-PGSIZE)부터 PHYS_BASE까지의 공간에 페이지 할당
   // PHYS_BASE를 top으로 삼아서 %esp가 유저 스택 공간의 최상단 가리키도록. 
-  printf("===Before setup_stack====\n");
+  //printf("===Before setup_stack====\n");
 
   if (!setup_stack (esp))
     goto done;
 
-  printf("===Setup_stack success====\n");
+  //printf("===Setup_stack success====\n");
   
   // TODO_2: construct stack
     char *argv[64]; // 파싱된 문자열을 담을 배열 
@@ -451,16 +583,16 @@ load (const char *file_name, void (**eip) (void), void **esp)
     *esp = (char*)*esp -4;
     *(uint32_t *)*esp = (uint32_t)0;
 
-    printf("==== STACK DEBUG REACHED! ====\n");
-    for (int i = 0; i < argc; i++) {
-    printf("arg_addr[%d]=%p, content = %s\n", i, arg_addr[i], arg_addr[i]);
-    }
-    printf("[USER STACK DUMP]\n");
-    hex_dump((uint32_t)*esp,
-        *esp,
-         (size_t)(PHYS_BASE - (uint32_t)*esp),
-         true);
-    printf("==== STACK DEBUG FINISHED ====\n");
+    //printf("==== STACK DEBUG REACHED! ====\n");
+    //for (int i = 0; i < argc; i++) {
+    //printf("arg_addr[%d]=%p, content = %s\n", i, arg_addr[i], arg_addr[i]);
+    //}
+    //printf("[USER STACK DUMP]\n");
+    //hex_dump((uint32_t)*esp,
+    //    *esp,
+    //     (size_t)(PHYS_BASE - (uint32_t)*esp),
+    //     true);
+    //printf("==== STACK DEBUG FINISHED ====\n");
     /*
     printf("==== STACK DEBUG STARTED===");
     hex_dump((uint32_t )*esp, *esp, (size_t)(PHYS_BASE - (uint32_t)*esp), true);
@@ -473,7 +605,8 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
  done:
   /* We arrive here whether the load is successful or not. */
-  palloc_free_page(fn_copy);
+  if(fn_copy !=NULL)
+    palloc_free_page(fn_copy);
   file_close (file);
   return success;
 }
