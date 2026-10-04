@@ -399,7 +399,7 @@ syscall_handler (struct intr_frame *f UNUSED)
   //int syscall_num = *(int*)f->esp;
   int num = (int)get_arg(f,0);
 
-  // 유효한 시스템 콜 번호인지 확인(0~14(max_of_four_int와 fibonacci도 구현한다는 전제하에))
+  // 유효한 시스템 콜 번호인지 확인
   if(num<0 || num>14)
     sys_exit(-1);
 
