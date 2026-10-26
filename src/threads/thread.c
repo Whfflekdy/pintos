@@ -222,6 +222,8 @@ thread_create (const char *name, int priority,
   // CPU를 부모 스레드에게서 빼앗아 자식에게 넘겨주면 current가 자식이 되는 것. 
   /* Add to run queue. */
   thread_unblock (t);
+  // 새로 높은 스레드가 생겼을 수 있으므로
+  thread_check_preempt();
 
   return tid;
 }
@@ -294,6 +296,36 @@ thread_wake_up(void)
     list_pop_front(&sleep_list);
     thread_unblock(t);
   }
+  // 방금 깨운 스레드가 지금 실행 중인 스레드보다 우선 순위가 높을 수 있음. 
+  thread_check_preempt();
+}
+
+/* a의 우선순위가 b보다 높으면 true (내림차순 정렬 기준) */
+bool
+thread_priority_greater(const struct list_elem *a, const struct list_elem *b,
+                        void *aux UNUSED)
+{
+  return list_entry(a, struct thread, elem)->priority
+       > list_entry(b, struct thread, elem)->priority;
+}
+
+/* ready list에 현재 스레드보다 높은 우선순위가 있으면 CPU를 양보 */
+void
+thread_check_preempt(void)
+{
+  struct thread *cur = thread_current();
+  enum intr_level old_level = intr_disable();
+  bool should_yield = !list_empty(&ready_list)
+    && list_entry(list_front(&ready_list), struct thread, elem)->priority > cur->priority;
+  intr_set_level(old_level);
+
+  if(should_yield)
+  {
+    if(intr_context())
+      intr_yield_on_return(); // 인터럽트 처리 중이면 끝난 뒤에 yield
+    else
+      thread_yield();
+  }
 }
 
 #ifndef USERPROG
@@ -338,7 +370,7 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+  list_insert_ordered(&ready_list, &t->elem, thread_priority_greater, NULL);
   t->status = THREAD_READY;
   intr_set_level (old_level);
 }
@@ -409,7 +441,7 @@ thread_yield (void)
 
   old_level = intr_disable ();
   if (cur != idle_thread) 
-    list_push_back (&ready_list, &cur->elem);
+    list_insert_ordered(&ready_list, &cur->elem, thread_priority_greater, NULL);
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -437,6 +469,8 @@ void
 thread_set_priority (int new_priority) 
 {
   thread_current ()->priority = new_priority;
+  // 우선 순위를 낮추게 되면 ready_list에 더 높은 게 있을 수 있음
+  thread_check_preempt();
 }
 
 /* Returns the current thread's priority. */

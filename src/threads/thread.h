@@ -176,6 +176,8 @@ void thread_set_priority (int);
 
 void thread_sleep (int64_t);
 void thread_wake_up(void);
+bool thread_priority_greater(const struct list_elem *a, 
+                             const struct list_elem *b, void *aux);
 
 #ifndef USERPROG
 void thread_aging(void);
