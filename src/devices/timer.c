@@ -92,8 +92,14 @@ timer_sleep (int64_t ticks)
   int64_t start = timer_ticks ();
 
   ASSERT (intr_get_level () == INTR_ON);
-  while (timer_elapsed (start) < ticks) 
-    thread_yield ();
+  // 기존의 busy waiting 방식을 지우고, 스레드를 수면 큐에 넣고 block 시키는 코드로 변경.
+  if(ticks <= 0)
+    return; 
+
+  thread_sleep(start + ticks); // 깨어날 시각을 넘김. 
+
+  //while (timer_elapsed (start) < ticks) 
+  //  thread_yield ();
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -166,6 +172,7 @@ timer_print_stats (void)
   printf ("Timer: %"PRId64" ticks\n", timer_ticks ());
 }
 
+// 매 틱마다 timer interrupt가 발생할 때 호출되는 함수.
 /* Timer interrupt handler. */
 static void
 timer_interrupt (struct intr_frame *args UNUSED)

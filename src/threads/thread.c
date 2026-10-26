@@ -11,6 +11,7 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "devices/timer.h"
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -23,6 +24,8 @@
 /* List of processes in THREAD_READY state, that is, processes
    that are ready to run but not actually running. */
 static struct list ready_list;
+/* 잠든 스레드들을 관리할 수면 큐 */
+static struct list sleep_list;
 
 /* List of all processes.  Processes are added to this list
    when they are first scheduled and removed when they exit. */
@@ -53,6 +56,10 @@ static long long user_ticks;    /* # of timer ticks in user programs. */
 /* Scheduling. */
 #define TIME_SLICE 4            /* # of timer ticks to give each thread. */
 static unsigned thread_ticks;   /* # of timer ticks since last yield. */
+
+#ifndef USERPROG
+bool thread_prior_aging;
+#endif
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
@@ -93,6 +100,7 @@ thread_init (void)
   lock_init (&tid_lock);
   list_init (&ready_list);
   list_init (&all_list);
+  list_init(&sleep_list);
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
@@ -138,6 +146,13 @@ thread_tick (void)
   /* Enforce preemption. */
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
+
+  thread_wake_up();
+
+#ifndef USERPROG
+  if(thread_prior_aging == true)
+    thread_aging();
+#endif
 }
 
 /* Prints thread statistics. */
@@ -183,12 +198,10 @@ thread_create (const char *name, int priority,
   /* Initialize thread. */
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
-  
+  #ifdef USERPROG
   // t의 자식 부모 관계 설정(현재의 current는 부모)
   t->parent = thread_current();
-  // list_init(&t->child_list); // 자식(t)의 자식 리스트 초기화 -> 어떤 경로로 스레드가 생성되든 자식 리스트가 잘 초기화되도록 init_thread()안으로 이동. 
-  // 부모의 child_list에 새로 생성된 자식인 t를 넣음.
-  // list_push_back(&thread_current()->child_list, &t->child_elem);
+  #endif
 
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame (t, sizeof *kf);
@@ -213,26 +226,6 @@ thread_create (const char *name, int priority,
   return tid;
 }
 
-/* 추가 구현 함수 
-  현재 스레드의 자식 리스트에서 주어진 tid에 해당하는 스레드를 찾아 반환하는 함수.
-*/
-/*
-struct thread*
-get_child_thread(tid_t tid)
-{
-  struct thread *current = thread_current();
-  struct list_elem *e;
-
-  for(e=list_begin(&current->child_list); 
-      e!=list_end(&current->child_list); e = list_next(e)){
-        struct thread *t = list_entry(e, struct thread, child_elem);
-        if(t->tid== tid)
-          return t;
-      }
-  return NULL;
-}
-*/
-
 struct thread*
 get_thread(tid_t tid)
 {
@@ -248,6 +241,7 @@ get_thread(tid_t tid)
   return NULL;
 }
 
+#ifdef USERPROG
 struct child_status *
 get_child_status(tid_t child_tid)
 {
@@ -262,6 +256,53 @@ get_child_status(tid_t child_tid)
       }
   return NULL;
 }
+#endif
+
+/* a가 b보다 먼저 깨어나야 하면 true (sleep_list를 정렬하기 위함.)*/
+static bool
+wakeup_less(const struct list_elem *a, const struct list_elem *b,
+            void *aux UNUSED)
+{
+  return list_entry(a, struct thread, sleep_elem)->wakeup_tick
+       < list_entry(b, struct thread, sleep_elem)->wakeup_tick;
+}
+
+void 
+thread_sleep(int64_t wakeup_tick)
+{
+  struct thread *cur = thread_current();
+  enum intr_level old_level;
+  // idle 스레드가 아닌 경우에만 재움. 
+  ASSERT(cur!= idle_thread);
+
+  old_level = intr_disable();
+  cur->wakeup_tick = wakeup_tick; // 깨워야 할 시간 저장
+  list_insert_ordered(&sleep_list, &cur->sleep_elem, wakeup_less, NULL);
+  thread_block(); // 재우기
+  intr_set_level(old_level);
+}
+
+void
+thread_wake_up(void)
+{
+  int64_t now = timer_ticks();
+  while(!list_empty(&sleep_list))
+  {
+    struct thread *t = list_entry(list_front(&sleep_list),struct thread, sleep_elem);
+    if(t->wakeup_tick > now)
+      break;
+    list_pop_front(&sleep_list);
+    thread_unblock(t);
+  }
+}
+
+#ifndef USERPROG
+/* ready list에서 기다리는 스레드들의 우선순위를 높인다 (나중에 구현)*/
+void
+thread_aging(void)
+{
+}
+#endif
 
 
 /* Puts the current thread to sleep.  It will not be scheduled
@@ -530,16 +571,17 @@ init_thread (struct thread *t, const char *name, int priority)
   sema_init(&t->load_sema, 0);
   sema_init(&t->exit_sema, 0);
   */
-  // 모든 스레드의 자식 리스트를 여기서 초기화. 
-  list_init (&t->child_list);
+  #ifdef USERPROG
+    // 모든 스레드의 자식 리스트를 여기서 초기화. 
+    list_init (&t->child_list);
 
   // memset으로 밀긴 하지만 명시적으로 한 번 더 적어줌(fd table의 경우는 memset을 사용해야 하니까 굳이 적지 않음)
   //t-> exit_status = 0;
   //t->load_success = false;
 
-  t->parent = NULL;
-  t->cp =NULL;
-
+    t->parent = NULL;
+    t->cp =NULL;
+  #endif
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
   intr_set_level (old_level);
