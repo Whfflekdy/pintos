@@ -329,10 +329,22 @@ thread_check_preempt(void)
 }
 
 #ifndef USERPROG
-/* ready list에서 기다리는 스레드들의 우선순위를 높인다 (나중에 구현)*/
+/* ready list에서 기다리는 스레드들의 우선순위를 1씩 올린다
+   매 틱 thread_ticks()에서 호출되며 기다린 시간에 비례해 우선순위가 오른다. */
 void
 thread_aging(void)
 {
+  struct list_elem *e;
+  // ready_list에 있는 스레드만 올림. (실행할 준비가 됐지만 순서가 안 오는 스레드)
+  for(e = list_begin(&ready_list); e!= list_end(&ready_list); 
+      e = list_next(e))
+      {
+        struct thread *t = list_entry(e, struct thread, elem);
+        if(t->priority < PRI_MAX)
+          t->priority++;
+      }
+
+  thread_check_preempt(); // 올라간 스레드가 현재보다 높아졌다면 양보를 예약함. 
 }
 #endif
 
