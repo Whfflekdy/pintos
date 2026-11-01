@@ -7,6 +7,10 @@
 #include <stdint.h>
 #include "threads/synch.h"
 
+#ifndef USERPROG
+extern bool thread_prior_aging;
+#endif
+
 /* States in a thread's life cycle. */
 enum thread_status
   {
@@ -115,27 +119,6 @@ struct thread
     //struct list child_list;             /* 생성한 자식 프로세스들의 리스트(wait(child_pid)호출 시에 실제 자식인지 확인하고 관리하기 위해) */
     struct list child_list;               /* 생성한 자식들의 'struct child_status' 리스트 */
     struct child_status *cp;              /* 자신이 속한 상태 상자(struct child_status)를 가리키는 포인터 (Child Pointer)*/
-    //struct list_elem child_elem;        /* child_list에 들어가기 위한 list_elem(자식 스레드 간의 연결 고리) */
-
-    // 부모가 wait(child_pid)를 호출했을 때, 자식 프로세스가 아직 끝나지 않았다면
-    // 부모는 자식이 끝날 때까지 Blocking 상태여야 하므로,
-    // 부모를 잠재우고(down), 자식이 종료될 때 깨워주기(up)위해 사용하는 세마포어(wait_sema)
-    //struct semaphore wait_sema;         /* 부모가 자식을 wait 할 때 사용하는 세마포어 */
-    
-    // 자식은 죽었지만, 부모가 아직 exit status를 읽지 않아서, 
-    // 이걸 읽고 sema up 할 때까지 자식이 스스로 소멸하지 않고 
-    // 대기하기 위해 사용하는 세마포어(exit_sema)
-    //struct semaphore exit_sema;         /* 부모가 자식의 exit status를 읽기 위해 사용하는 세마포어 */
-
-    // 부모가 process_execute()의 thread_create()에서 자식을 만들면
-    // 자식 프로세스가 프로그램 코드를 제대로 load 하는 데 시간이 걸리기 때문에
-    // 자식의 load가 끝나기 전에 부모가 다음 코드를 실행하거나, 자식의 상태를 조작하지 못하도록
-    // 자식의 load가 완전히 끝날 때까지 sema down하고 
-    // 로드가 성공하면 load_success를 true로 조정하고 sema up을 해준다. 
-
-    //struct semaphore load_sema;         /* 자식이 메모리에 완전히 로드될 때까지 부모가 기다릴 때 사용하는 세마포어 */
-    //bool load_success;                  /* 자식 프로세스의 로드 성공 여부 */
-    
     // wait으로 반환할 자식의 종료 코드
     int exit_status;                    /* 자식이 종료될 때 부모에게 전달할 종료 상태 */
 
@@ -146,6 +129,13 @@ struct thread
     struct file *fd_table[FD_MAX];
     struct file *exec_file; /* 실행줄인 파일 (쓰기 금지)*/
 #endif
+   // Alarm Clock 관련 필드의 경우 
+   // threads 빌드(USERPROG 없음)와 userprog 빌드 모두에 써야 하기에 
+   // #ifdef USERPROG 바깥에 둔다.
+
+   /* Alarm Clock 관련 필드 */
+    int64_t wakeup_tick; // wakeup을 할 tick 절대 시각(몇 번째 tick에 깰지)
+    struct list_elem sleep_elem; // sleep queue의 노드로 들어갈 list_elem
 
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
@@ -186,6 +176,16 @@ void thread_foreach (thread_action_func *, void *);
 
 int thread_get_priority (void);
 void thread_set_priority (int);
+
+void thread_sleep (int64_t);
+void thread_wake_up(void);
+bool thread_priority_greater(const struct list_elem *a, 
+                             const struct list_elem *b, void *aux);
+void thread_check_preempt (void);
+
+#ifndef USERPROG
+void thread_aging(void);
+#endif
 
 int thread_get_nice (void);
 void thread_set_nice (int);

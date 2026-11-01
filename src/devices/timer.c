@@ -70,6 +70,7 @@ timer_calibrate (void)
 int64_t
 timer_ticks (void) 
 {
+  // 인터럽트를 잠시 끄고 전역 ticks를 읽은 뒤 인터럽트 설정.
   enum intr_level old_level = intr_disable ();
   int64_t t = ticks;
   intr_set_level (old_level);
@@ -89,11 +90,16 @@ timer_elapsed (int64_t then)
 void
 timer_sleep (int64_t ticks) 
 {
-  int64_t start = timer_ticks ();
-
+  int64_t start = timer_ticks (); // 호출한 순간의 현재 틱
+  // 잠든 스레드는 나중에 타이머 인터럽트가 깨워줘야 해서, 인터럽트 켜진 상태에서만 호출됨.
   ASSERT (intr_get_level () == INTR_ON);
-  while (timer_elapsed (start) < ticks) 
-    thread_yield ();
+  // 기존의 busy waiting 방식을 지우고, 스레드를 수면 큐에 넣고 block 시키는 코드로 변경.
+  if(ticks <= 0) // 0이나 음수만큼 자는 건 기다릴 필요 없다는 뜻
+    return; 
+  thread_sleep(start + ticks); // 깨어날 시각을 넘김. 
+
+  //while (timer_elapsed (start) < ticks) 
+  //  thread_yield ();
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -166,12 +172,13 @@ timer_print_stats (void)
   printf ("Timer: %"PRId64" ticks\n", timer_ticks ());
 }
 
+// 매 틱마다 timer interrupt가 발생할 때 호출되는 함수.
 /* Timer interrupt handler. */
 static void
 timer_interrupt (struct intr_frame *args UNUSED)
 {
-  ticks++;
-  thread_tick ();
+  ticks++; // 부팅 후 지난 틱 수를 1 늘림. 
+  thread_tick (); // 스케줄러 쪽 매 틱 작업을 맡김. 
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer
