@@ -129,9 +129,12 @@ struct thread
     struct file *fd_table[FD_MAX];
     struct file *exec_file; /* 실행줄인 파일 (쓰기 금지)*/
 #endif
+   // Alarm Clock 관련 필드의 경우 
+   // threads 빌드(USERPROG 없음)와 userprog 빌드 모두에 써야 하기에 
+   // #ifdef USERPROG 바깥에 둔다.
 
    /* Alarm Clock 관련 필드 */
-    int64_t wakeup_tick; // wakeup을 할 tick 시각
+    int64_t wakeup_tick; // wakeup을 할 tick 절대 시각(몇 번째 tick에 깰지)
     struct list_elem sleep_elem; // sleep queue의 노드로 들어갈 list_elem
 
     /* Owned by thread.c. */
@@ -178,6 +181,7 @@ void thread_sleep (int64_t);
 void thread_wake_up(void);
 bool thread_priority_greater(const struct list_elem *a, 
                              const struct list_elem *b, void *aux);
+void thread_check_preempt (void);
 
 #ifndef USERPROG
 void thread_aging(void);

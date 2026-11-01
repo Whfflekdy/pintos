@@ -24,7 +24,9 @@
 /* List of processes in THREAD_READY state, that is, processes
    that are ready to run but not actually running. */
 static struct list ready_list;
-/* 잠든 스레드들을 관리할 수면 큐 */
+/* 잠든 스레드들을 관리할 수면 큐(wakeup_tick 오름차순으로 정렬) */
+/* static이라 thread.c 밖에서는 이름으로 접근 불가하여
+   timer.c는 thread_sleep(), thread_wake_up을 통해 접근한다. */
 static struct list sleep_list;
 
 /* List of all processes.  Processes are added to this list
@@ -78,6 +80,8 @@ static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
 
+//void thread_check_preempt (void);
+
 
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
@@ -98,9 +102,10 @@ thread_init (void)
   ASSERT (intr_get_level () == INTR_OFF);
 
   lock_init (&tid_lock);
+  // init 호출 없이 쓰면 head/tail이 0으로 채워진 상태라 순회할 때 NULL을 따라가 커널이 죽음
   list_init (&ready_list);
   list_init (&all_list);
-  list_init(&sleep_list);
+  list_init(&sleep_list); // 스레드 하나라도 잠들기 전에 초기화해야함.
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
@@ -143,12 +148,15 @@ thread_tick (void)
   else
     kernel_ticks++;
 
+  // 한 스레드가 TIME_SLICE를 다 쓰면 인터럽트가 끝날 때 양보 (round-robin)
   /* Enforce preemption. */
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
 
+  // 매 틱마다 깨어날 스레드가 있는지 확인. 
   thread_wake_up();
 
+// aging의 경우 -aging 옵션이 켜졌을 때만 매 틱 실행한다. 
 #ifndef USERPROG
   if(thread_prior_aging == true)
     thread_aging();
@@ -265,6 +273,8 @@ static bool
 wakeup_less(const struct list_elem *a, const struct list_elem *b,
             void *aux UNUSED)
 {
+  // a가 b보다 엄격히 먼저 깨어날 때만 true..
+  // (<) 같은 시각이면 false라서 같은 시각에 이미 잠든 스레드들 뒤에 들어감.(먼저 잠든 순서가 유지됨.)
   return list_entry(a, struct thread, sleep_elem)->wakeup_tick
        < list_entry(b, struct thread, sleep_elem)->wakeup_tick;
 }
@@ -272,30 +282,51 @@ wakeup_less(const struct list_elem *a, const struct list_elem *b,
 void 
 thread_sleep(int64_t wakeup_tick)
 {
+  // 잠들 스레드(timer_sleep()을 부른 자기 자신)
   struct thread *cur = thread_current();
+  // interrupt를 끄기 전 상태를 기억해둘 변수
   enum intr_level old_level;
   // idle 스레드가 아닌 경우에만 재움. 
+  // CPU는 모든 스레드가 자거나 기다려서 ready_list가 비면
+  // next_thread_to_run()이 idle을 돌려줌
+  // idle은 다음 인터럽트가 올 때까지 std;glt로 CPU를 쉬게하는 역할.
+  // 그런 idle을 sleep_list에 넣고 재우면 실행할 게 없을 때 CPU가 돌릴 대상이 사라지고
+  // 나중에 깨울 때 idle이 ready_list에 들어가서
+  // idle은 ready_list에 넣지 않는다는 Pintos의 규칙도 깨짐. (실제로 idle이 timer_sleep()을 부를 일은 없지만 ㅎㅎ)
   ASSERT(cur!= idle_thread);
-
+  // 인터럽트를 끄고 이전 상태를 돌려받음
+  // list에 넣는 도중 타이머 인터럽트의 thread_wake_up()이 같은 리스트를 건드리면 안 되므로,
+  // 리스트에 넣은 뒤 thread_block() 전에 인터럽트가 꺠우려 하면 아직 RUNNING이라
+  // thread_unblock()의 ASSERT(status==THREAD_BLOCKED)가 실패한다
   old_level = intr_disable();
-  cur->wakeup_tick = wakeup_tick; // 깨워야 할 시간 저장
+  cur->wakeup_tick = wakeup_tick; // 깨워야 할 시각을 스레드에 기록.(리스트에 넣기 전에!)
+  // list를 앞에서부터 보며 wakeup_less(새 노드, e)가 처음 true가 되는 e 앞에 삽이반다. 
+  // -> 리스트는 깨어날 시각 오름 차순으로 정렬됨. 
   list_insert_ordered(&sleep_list, &cur->sleep_elem, wakeup_less, NULL);
+  // 상태를 BLOCKED로 바꾸고 schedule()로 다른 스레드에게 CPU를 넘긴다. 
+  // 이 스레드 실행은 여기서 멈추고, 나중에 누군가 thread_unblock()해서 다시 스케줄되면 바로 다음 줄부터 이어서 실행됨. 
   thread_block(); // 재우기
-  intr_set_level(old_level);
+  intr_set_level(old_level); // 깨어난 뒤 인터럽트를 이전 상태로 되돌림. 
 }
 
 void
 thread_wake_up(void)
 {
-  int64_t now = timer_ticks();
-  while(!list_empty(&sleep_list))
+  int64_t now = timer_ticks(); // 현재 틱(방금 ticks++된 값)
+  while(!list_empty(&sleep_list)) // 잠든 스레드가 남아 있는 동안 반복
   {
+    // 맨 앞 노드에 해당하는 스레드를 찾음.(깨우기 위해서)
     struct thread *t = list_entry(list_front(&sleep_list),struct thread, sleep_elem);
-    if(t->wakeup_tick > now)
+    if(t->wakeup_tick > now) // front도 아직 깨울 시각이 안 됐으면 멈춘다.(정렬해뒀기 때문)
       break;
+    // front를 깨울 시각이 됐다면 해당 스레드를 sleep_list에서 pop한다.
     list_pop_front(&sleep_list);
+    // 해당 스레드를 BLOCKED->READY로 바꾸고 ready_list에 넣는다.
+    // 깨어난 스레드는 thread_sleep()의 thread_block() 다음 줄부터 다시 실행되면 선점하지 않는다. 
     thread_unblock(t);
   }
+  // 루프가 끝난 후 한 번만 호출
+  // 꺠운 스레드 중 지금 실행 중인 스레드보다 우선 순위가 높은 스레드가 있으면 양보한다. 
   // 방금 깨운 스레드가 지금 실행 중인 스레드보다 우선 순위가 높을 수 있음. 
   thread_check_preempt();
 }
@@ -313,18 +344,22 @@ thread_priority_greater(const struct list_elem *a, const struct list_elem *b,
 void
 thread_check_preempt(void)
 {
+  // 지금 CPU를 쓰고 있는 스레드.
   struct thread *cur = thread_current();
+  // ready_list를 읽는 동안 타이머 인터럽트가 해당 리스트를 바꾸지 못하도록 인터럽트를 끈다.
   enum intr_level old_level = intr_disable();
+  // 기다리는 스레드가 있어야 양보 가능. // 리스트의 front가 지금 스레드보다 우선순위가 > 일 때만 양보. 
   bool should_yield = !list_empty(&ready_list)
     && list_entry(list_front(&ready_list), struct thread, elem)->priority > cur->priority;
   intr_set_level(old_level);
 
   if(should_yield)
   {
+    // 인터럽트 안에서 불린 경우(wake_up, aging)
     if(intr_context())
-      intr_yield_on_return(); // 인터럽트 처리 중이면 끝난 뒤에 yield
+      intr_yield_on_return(); // 인터럽트 처리 중이면 끝난 뒤에 yield. (ASSERT(!intr_context())로 커널이 죽지 않도록)
     else
-      thread_yield();
+      thread_yield(); // 일반 실행 중이면 바로 양보. ㄴ
   }
 }
 
@@ -335,15 +370,22 @@ void
 thread_aging(void)
 {
   struct list_elem *e;
+  enum intr_level old_level = intr_disable();
+
   // ready_list에 있는 스레드만 올림. (실행할 준비가 됐지만 순서가 안 오는 스레드)
   for(e = list_begin(&ready_list); e!= list_end(&ready_list); 
       e = list_next(e))
       {
         struct thread *t = list_entry(e, struct thread, elem);
-        if(t->priority < PRI_MAX)
+        if(t->priority < PRI_MAX){
           t->priority++;
+        }
       }
 
+  // 2. 우선순위가 변경되었으므로 ready_list 전체를 우선순위 기준 내림차순으로 재정렬
+  list_sort(&ready_list, thread_priority_greater, NULL);
+
+  intr_set_level(old_level);
   thread_check_preempt(); // 올라간 스레드가 현재보다 높아졌다면 양보를 예약함. 
 }
 #endif
@@ -380,11 +422,13 @@ thread_unblock (struct thread *t)
 
   ASSERT (is_thread (t));
 
+  // ready_list는 타이머 인터럽트에서도 건드리므로 인터럽트를 끄고 조작.
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
+  // 우선 순위에 맞는 자리에 끼워넣음. 
   list_insert_ordered(&ready_list, &t->elem, thread_priority_greater, NULL);
-  t->status = THREAD_READY;
-  intr_set_level (old_level);
+  t->status = THREAD_READY; // 상태를 READY로 바꿈.
+  intr_set_level (old_level); // 인터럽트 상태 복원. 
 }
 
 /* Returns the name of the running thread. */
@@ -449,13 +493,13 @@ thread_yield (void)
   struct thread *cur = thread_current ();
   enum intr_level old_level;
   
-  ASSERT (!intr_context ());
+  ASSERT (!intr_context ()); // 인터럽트 중에는 직접 양보 불가능. 
 
   old_level = intr_disable ();
-  if (cur != idle_thread) 
+  if (cur != idle_thread)  // idle 스레드는 ready_list에 넣지 않음. 아래는 자기 자신을 우선순위 자리에 넣는 코드. 
     list_insert_ordered(&ready_list, &cur->elem, thread_priority_greater, NULL);
-  cur->status = THREAD_READY;
-  schedule ();
+  cur->status = THREAD_READY; // READY로 바꾸고
+  schedule (); // 다음 스레드로 전환. 
   intr_set_level (old_level);
 }
 
